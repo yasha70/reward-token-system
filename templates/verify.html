@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block head %}
+<script src="/static/html5-qrcode.min.js"></script>
+<style>
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+  @media (max-width:760px){ .grid { grid-template-columns:1fr; } }
+  #reader { width:100%; min-height:60px; border-radius:8px; overflow:hidden; background:#111; }
+  .result { border-radius:12px; padding:22px; color:#fff; text-align:center; }
+  .result .big { font-size:30px; font-weight:800; letter-spacing:.02em; }
+  .result .msg { margin-top:6px; font-size:15px; }
+  .result table { margin-top:14px; background:rgba(255,255,255,.15); border-radius:8px; color:#fff; }
+  .result td, .result th { border-color:rgba(255,255,255,.2); }
+  .VALID{background:var(--ok)} .CLAIMED_NOW{background:#2563eb} .CLAIMED{background:var(--warn)}
+  .FAKE{background:var(--bad)} .EXPIRED,.VOID{background:var(--grey)}
+  .result button { margin-top:16px; background:#fff; color:var(--ok); font-size:17px; padding:13px 26px; }
+  .idle { background:#fff; border:2px dashed var(--line); color:var(--muted); }
+</style>
+{% endblock %}
+{% block body %}
+<h1>Admin: scan &amp; verify token</h1>
+<div class="grid">
+  <div class="card">
+    <h2>1. Scan barcode</h2>
+    <div id="reader" hidden></div>
+    <div style="margin-top:10px; display:flex; gap:8px">
+      <button id="camBtn" type="button">Start camera</button>
+      <button id="stopBtn" type="button" class="secondary" hidden>Stop camera</button>
+    </div>
+    <form id="manual" style="margin-top:18px">
+      <label>…or type the code / use a USB barcode scanner</label>
+      <input id="code" placeholder="RW-XXXXXXXX-XXXXXX" autocomplete="off" autofocus>
+      <div style="margin-top:10px"><button>Check token</button></div>
+    </form>
+  </div>
+  <div>
+    <div id="result" class="result idle">
+      <div class="big">Waiting for a token…</div>
+      <div class="msg">Scan or enter a token to check if it is valid, fake or already claimed.</div>
+    </div>
+    <div class="card" style="margin-top:20px">
+      <h2>Recent checks (this session)</h2>
+      <table id="hist"><tbody></tbody></table>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const LABEL = {VALID:'✅ VALID TOKEN', CLAIMED_NOW:'🎉 CLAIMED', CLAIMED:'⚠️ ALREADY CLAIMED',
+               FAKE:'❌ FAKE TOKEN', EXPIRED:'⌛ EXPIRED', VOID:'🚫 CANCELLED'};
+let busy = false, lastCode = '', lastTime = 0;
+
+async function post(url, code) {
+  const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code})});
+  if (r.status === 401) { location.href = '/login?next=/verify'; return; }
+  return r.json();
+}
+
+function show(j) {
+  const t = j.token;
+  let rows = '';
+  if (t) rows = `<table>
+    <tr><th>Code</th><td><code>${esc(t.code)}</code></td></tr>
+    <tr><th>Reward</th><td>${esc(t.reward_type)}: <b>${esc(t.reward_item)}</b></td></tr>
+    ${t.customer||t.phone ? `<tr><th>Customer</th><td>${esc(t.customer)} ${esc(t.phone)}</td></tr>`:''}
+    <tr><th>Issued</th><td>${esc(t.issued_at)} at ${esc(t.issued_by)}</td></tr>
+    <tr><th>Expires</th><td>${esc(t.expires_at || 'Never')}</td></tr>
+    ${t.claimed_at ? `<tr><th>Claimed</th><td>${esc(t.claimed_at)} at ${esc(t.claimed_outlet)}</td></tr>`:''}
+  </table>`;
+  else rows = `<div class="msg" style="opacity:.85">Scanned: <code>${esc(j.code || '(empty)')}</code></div>`;
+  $('#result').className = 'result ' + j.status;
+  $('#result').innerHTML = `<div class="big">${LABEL[j.status]}</div><div class="msg">${esc(j.message)}</div>${rows}
+    ${j.status==='VALID' ? `<button id="claimBtn">Mark as claimed &amp; give reward</button>`:''}`;
+  if (j.status === 'VALID') $('#claimBtn').onclick = () => claim(j.code);
+  const tr = document.createElement('tr');
+  tr.innerHTML = `<td>${new Date().toLocaleTimeString()}</td><td><code>${esc(j.code)}</code></td><td><b>${LABEL[j.status]}</b></td>`;
+  $('#hist tbody').prepend(tr);
+  beep(j.status === 'VALID' || j.status === 'CLAIMED_NOW');
+}
+
+async function check(code) {
+  code = code.trim().toUpperCase();
+  if (!code || busy) return;
+  // ignore the same barcode being read repeatedly by the camera
+  if (code === lastCode && Date.now() - lastTime < 4000) return;
+  lastCode = code; lastTime = Date.now(); busy = true;
+  try { show(await post('/api/verify', code)); } finally { busy = false; }
+}
+
+async function claim(code) {
+  $('#claimBtn').disabled = true;
+  show(await post('/api/claim', code));
+}
+
+function beep(good) {
+  try {
+    const a = new (window.AudioContext||window.webkitAudioContext)(), o = a.createOscillator();
+    o.frequency.value = good ? 880 : 220; o.connect(a.destination); o.start(); o.stop(a.currentTime + (good?.15:.4));
+  } catch(e) {}
+}
+
+$('#manual').onsubmit = e => { e.preventDefault(); lastCode=''; check($('#code').value); $('#code').value=''; };
+
+let scanner;
+$('#camBtn').onclick = async () => {
+  if (!window.Html5Qrcode) { alert('Scanner library failed to load (needs internet).'); return; }
+  scanner = new Html5Qrcode('reader', {formatsToSupport:[Html5QrcodeSupportedFormats.CODE_128, Html5QrcodeSupportedFormats.QR_CODE]});
+  try {
+    $("#reader").hidden = false;
+    await scanner.start({facingMode:'environment'}, {fps:10, qrbox:{width:300, height:120}}, txt => check(txt));
+    $('#camBtn').hidden = true; $('#stopBtn').hidden = false;
+  } catch (err) {
+    $('#reader').hidden = true; alert('Could not start camera: ' + err + '\nCamera needs HTTPS (or localhost) and permission.');
+  }
+};
+$("#stopBtn").onclick = async () => { await scanner.stop(); $("#reader").hidden = true; $('#camBtn').hidden = false; $('#stopBtn').hidden = true; };
+</script>
+{% endblock %}

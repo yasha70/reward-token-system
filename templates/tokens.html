@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>All tokens</h1>
+<div class="card" style="display:flex; gap:24px; flex-wrap:wrap">
+  <div><div class="muted">Active</div><b style="font-size:22px">{{ stats.get('active',0) }}</b></div>
+  <div><div class="muted">Claimed</div><b style="font-size:22px">{{ stats.get('claimed',0) }}</b></div>
+  <div><div class="muted">Cancelled</div><b style="font-size:22px">{{ stats.get('void',0) }}</b></div>
+  <div><div class="muted">Fake scans caught</div><b style="font-size:22px;color:var(--bad)">{{ fakes }}</b></div>
+</div>
+<div class="card">
+  <form style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px">
+    <input name="q" value="{{ q }}" placeholder="Search code, customer, phone, item" style="flex:1; min-width:200px">
+    <select name="status" style="width:auto">
+      <option value="">All statuses</option>
+      {% for s in ['active','claimed','void'] %}<option {{ 'selected' if status==s }}>{{ s }}</option>{% endfor %}
+    </select>
+    <button>Filter</button>
+  </form>
+  <div style="overflow-x:auto">
+  <table>
+    <tr><th>Code</th><th>Reward</th><th>Customer</th><th>Issued</th><th>Status</th><th></th></tr>
+    {% for r in rows %}
+    {% set expired = r.status=='active' and r.expires_at and r.expires_at < now %}
+    <tr>
+      <td><code>{{ r.code }}</code></td>
+      <td>{{ r.reward_type }}<br><span class="muted">{{ r.reward_item }}</span></td>
+      <td>{{ r.customer }}<br><span class="muted">{{ r.phone }}</span></td>
+      <td>{{ r.issued_at[:16] }}<br><span class="muted">{{ r.issued_by }}</span></td>
+      <td><span class="pill {{ 'expired' if expired else r.status }}">{{ 'expired' if expired else r.status }}</span>
+        {% if r.claimed_at %}<br><span class="muted">{{ r.claimed_at[:16] }}<br>{{ r.claimed_outlet }}</span>{% endif %}</td>
+      <td style="white-space:nowrap"><a href="/token/{{ r.code }}" target="_blank">Ticket</a>
+        {% if r.status=='active' %}· <a href="#" onclick="voidTok('{{ r.code }}');return false" style="color:var(--bad)">Cancel</a>{% endif %}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="muted">No tokens yet.</td></tr>
+    {% endfor %}
+  </table>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function voidTok(code) {
+  if (!confirm('Cancel token ' + code + '? It can no longer be claimed.')) return;
+  await fetch('/api/void', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code})});
+  location.reload();
+}
+</script>
+{% endblock %}

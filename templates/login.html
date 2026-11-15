@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Login - Reward Tokens</title>
+<style>
+ body{margin:0;min-height:100vh;display:grid;place-items:center;background:#1d2330;font-family:system-ui,sans-serif}
+ form{background:#fff;padding:28px;border-radius:14px;width:min(360px,92vw)}
+ h1{margin:0 0 4px;font-size:22px} p{color:#6b7280;margin:0 0 16px;font-size:14px}
+ label{display:block;font-size:13px;font-weight:600;margin:12px 0 4px}
+ input{width:100%;box-sizing:border-box;padding:10px 12px;font-size:15px;border:1px solid #e3e6eb;border-radius:8px}
+ button{margin-top:18px;width:100%;background:#e2552b;color:#fff;border:0;border-radius:8px;padding:12px;font-size:15px;font-weight:600}
+ .err{color:#dc2626;margin-top:10px;font-size:14px}
+</style></head><body>
+<form method="post">
+  <h1>🎁 Reward Tokens</h1>
+  <p>Admin login</p>
+  <label>Outlet name</label>
+  <input name="outlet" placeholder="e.g. MG Road Outlet" required>
+  <label>Admin password</label>
+  <input name="password" type="password" required autofocus>
+  <button>Login</button>
+  {% if error %}<div class="err">{{ error }}</div>{% endif %}
+</form>
+</body></html>

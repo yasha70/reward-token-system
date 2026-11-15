@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="card">
+  <h1>Generate reward token</h1>
+  <form id="f">
+    <div class="row">
+      <div><label>Reward type</label>
+        <select name="reward_type"><option>Free Food</option><option>Gift</option></select></div>
+      <div><label>Food / gift item *</label>
+        <input name="reward_item" placeholder="e.g. 1 Medium Pizza, Coffee Mug" required></div>
+    </div>
+    <div class="row">
+      <div><label>Customer name (optional)</label><input name="customer"></div>
+      <div><label>Customer phone (optional)</label><input name="phone"></div>
+    </div>
+    <div class="row">
+      <div><label>Valid for (days, 0 = never expires)</label><input name="valid_days" type="number" value="30" min="0"></div>
+      <div><label>Number of tokens</label><input name="quantity" type="number" value="1" min="1" max="100"></div>
+    </div>
+    <div style="margin-top:18px"><button>Generate token</button></div>
+    <div class="err" id="err"></div>
+  </form>
+</div>
+<div class="card" id="out" hidden>
+  <h2>Generated tokens</h2>
+  <p class="muted">Open a ticket to print it or show the barcode to the customer.</p>
+  <div id="list"></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+document.getElementById('f').onsubmit = async e => {
+  e.preventDefault();
+  const data = Object.fromEntries(new FormData(e.target));
+  const err = document.getElementById('err'); err.textContent = '';
+  const r = await fetch('/api/tokens', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
+  const j = await r.json();
+  if (!r.ok) { err.textContent = j.error; return; }
+  if (j.codes.length === 1) { location.href = '/token/' + j.codes[0]; return; }
+  document.getElementById('out').hidden = false;
+  document.getElementById('list').innerHTML = j.codes.map(c =>
+    `<div style="padding:6px 0"><code>${c}</code> &nbsp; <a href="/token/${c}" target="_blank">Open ticket →</a></div>`).join('');
+};
+</script>
+{% endblock %}
