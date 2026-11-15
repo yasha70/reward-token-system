@@ -54,7 +54,11 @@ typing the code work without HTTPS.
 ## Deploy live on Vercel
 
 The app is ready for Vercel: `app.py` is detected as a Flask app, and `public/static` is served from Vercel's CDN.
-Vercel doesn't keep files, so it needs a **Postgres database**. The app will not start on Vercel without one.
+Vercel doesn't keep files, so it needs a database. Connect **one** of these in the project's **Storage** tab:
+- **Upstash Redis** (sets `KV_REST_API_URL` / `KV_REST_API_TOKEN`). The app keeps all its data under the `rwtok:` prefix, so it can share a database with other apps.
+- **Neon Postgres** (sets `DATABASE_URL`).
+
+Until a database and the settings below are in place, every page shows a **Setup needed** page listing what's missing, and `/health` reports the same.
 
 ### Option A: from the Vercel website (no command line)
 1. Put this folder in a GitHub repository.
@@ -92,7 +96,8 @@ Vercel serves over HTTPS, so **phone camera scanning works** on the live site.
 |---|---|---|
 | `ADMIN_PASSWORD` | `admin123` | Login password. **Change it.** |
 | `TOKEN_SECRET` | auto-generated `.secret_key` file | Signing key. Back it up: if you lose it, all existing tokens show as fake. |
-| `DATABASE_URL` / `POSTGRES_URL` | (none) | Postgres connection string. Required on Vercel. Without it, local SQLite is used. |
+| `KV_REST_API_URL` + `KV_REST_API_TOKEN` | (none) | Upstash Redis REST API. Used first if set. |
+| `DATABASE_URL` / `POSTGRES_URL` | (none) | Postgres connection string. Used when Redis isn't set. Without either, local SQLite is used. |
 | `TOKEN_DB` | `tokens.db` | Local SQLite database file |
 | `APP_TIMEZONE` | server time | For example `Asia/Kolkata` |
 | `PORT` | `5000` | Port to run on |

@@ -11,20 +11,24 @@ How fake tokens are detected
     SSSSSS   = HMAC-SHA256 signature of the id, made with a secret key
   A code is FAKE if its format is wrong, its signature does not match
   (someone made it up or changed a character), or it isn't in the database.
-  Claiming uses a single atomic UPDATE, so one token can never be claimed
-  twice, even if two outlets scan it at the same moment.
+  Claiming is atomic in every storage backend (see storage.py), so one token
+  can never be claimed twice, even if two outlets scan it at the same moment.
+
+Storage: Upstash Redis (KV_REST_API_URL/TOKEN), Postgres (DATABASE_URL) or,
+locally, a SQLite file.
 """
 import hashlib
 import hmac
 import os
 import re
 import secrets
-import sqlite3
 from datetime import datetime, timedelta
 from functools import wraps
 
 from flask import (Flask, abort, g, jsonify, redirect, render_template,
                    request, session, url_for)
+
+from storage import RedisStore, SQLStore
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ON_VERCEL = bool(os.environ.get("VERCEL"))
@@ -54,21 +58,25 @@ def find_database_url():
 
 
 DATABASE_URL = find_database_url()
+# Upstash Redis via Vercel's Upstash/KV integration (or Upstash directly).
+REDIS_REST_URL = os.environ.get("KV_REST_API_URL") or os.environ.get("UPSTASH_REDIS_REST_URL")
+REDIS_REST_TOKEN = os.environ.get("KV_REST_API_TOKEN") or os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+USE_REDIS = bool(REDIS_REST_URL and REDIS_REST_TOKEN)
 
-INTEGRITY_ERRORS = (sqlite3.IntegrityError,)
-if DATABASE_URL:
+if USE_REDIS:
+    BACKEND = "redis (upstash)"
+elif DATABASE_URL:
+    BACKEND = "postgres"
     try:
-        import psycopg
-        from psycopg.rows import dict_row
-        INTEGRITY_ERRORS = (psycopg.errors.UniqueViolation,)
+        import psycopg  # noqa: F401
     except Exception as e:
         CONFIG_ERRORS.append(f"Postgres driver failed to load: {type(e).__name__}: {e}")
 else:
-    INTEGRITY_ERRORS = (sqlite3.IntegrityError,)
+    BACKEND = "sqlite"
     if ON_VERCEL:
         CONFIG_ERRORS.append(
-            "No database connected. In Vercel open Storage -> Create Database -> Neon (Postgres), "
-            "connect it to this project, then Redeploy.")
+            "No database connected. In Vercel open Storage and connect an Upstash Redis or "
+            "Neon Postgres database to this project, then Redeploy.")
 
 if ON_VERCEL and not ADMIN_PASSWORD:
     CONFIG_ERRORS.append("ADMIN_PASSWORD is not set. Add it in Settings -> Environment Variables, then Redeploy.")
@@ -107,92 +115,45 @@ app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
 
 
 # ---------------------------------------------------------------- database
-class Database:
-    """Tiny wrapper so the same SQL (with ? placeholders) runs on SQLite or Postgres."""
-
-    def __init__(self):
-        if DATABASE_URL:
-            self.conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
-        else:
-            self.conn = sqlite3.connect(DB_PATH)
-            self.conn.row_factory = sqlite3.Row
-
-    def execute(self, sql, args=()):
-        if DATABASE_URL:
-            sql = sql.replace("?", "%s")
-        cur = self.conn.cursor()
-        cur.execute(sql, args)
-        return cur
-
-    def commit(self):
-        self.conn.commit()
-
-    def rollback(self):
-        self.conn.rollback()
-
-    def close(self):
-        self.conn.close()
+def make_store():
+    if USE_REDIS:
+        return RedisStore(REDIS_REST_URL, REDIS_REST_TOKEN)
+    return SQLStore(DATABASE_URL, DB_PATH)
 
 
-def db():
-    if "db" not in g:
-        g.db = Database()
-    return g.db
+def store():
+    if "store" not in g:
+        g.store = make_store()
+    return g.store
 
 
 @app.teardown_appcontext
-def close_db(_exc):
-    conn = g.pop("db", None)
-    if conn is not None:
-        conn.close()
-
-
-SCHEMA = [
-    """CREATE TABLE IF NOT EXISTS tokens (
-        code           TEXT PRIMARY KEY,
-        reward_type    TEXT NOT NULL,          -- 'Free Food' or 'Gift'
-        reward_item    TEXT NOT NULL,
-        customer       TEXT,
-        phone          TEXT,
-        issued_at      TEXT NOT NULL,
-        issued_by      TEXT,
-        expires_at     TEXT,
-        status         TEXT NOT NULL DEFAULT 'active',  -- active | claimed | void
-        claimed_at     TEXT,
-        claimed_outlet TEXT
-    )""",
-    """CREATE TABLE IF NOT EXISTS scan_log (
-        id         %s,
-        code       TEXT,
-        result     TEXT,
-        outlet     TEXT,
-        scanned_at TEXT
-    )""" % ("SERIAL PRIMARY KEY" if DATABASE_URL else "INTEGER PRIMARY KEY AUTOINCREMENT"),
-]
+def close_store(_exc):
+    st = g.pop("store", None)
+    if st is not None:
+        st.close()
 
 
 _db_ready = False
-_db_error = None
 
 
 def init_db():
-    """Create tables once per server instance. Returns an error string or None."""
-    global _db_ready, _db_error
+    """Prepare storage once per server instance. Returns an error string or None."""
+    global _db_ready
     if _db_ready:
         return None
     try:
-        d = Database()
-        for stmt in SCHEMA:
-            d.execute(stmt)
-        d.commit()
-        d.close()
-        _db_ready, _db_error = True, None
+        st = make_store()
+        st.init()
+        st.close()
+        _db_ready = True
+        return None
     except Exception as e:  # report it on the page instead of a bare 500
         msg = str(e).strip().splitlines()[0] if str(e).strip() else ""
-        if DATABASE_URL:
-            msg = msg.replace(DATABASE_URL, "<DATABASE_URL>")
-        _db_error = f"Cannot connect to the database ({type(e).__name__}: {msg[:200]})"
-    return _db_error
+        for secret in (DATABASE_URL, REDIS_REST_TOKEN):
+            if secret:
+                msg = msg.replace(secret, "<hidden>")
+        return f"Cannot connect to the database ({type(e).__name__}: {msg[:200]})"
 
 
 SETUP_PAGE = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
@@ -225,7 +186,7 @@ def require_setup():
 def health():
     errs = problems()
     return jsonify(ok=not errs, problems=errs, on_vercel=ON_VERCEL,
-                   database="postgres" if DATABASE_URL else "sqlite",
+                   database=BACKEND,
                    timezone=APP_TIMEZONE or "server default"), (200 if not errs else 503)
 
 
@@ -255,10 +216,6 @@ def now() -> str:
     return local_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def token_dict(row):
-    return dict(row) if row else None
-
-
 def check_token(code: str):
     """Return (status, message, token) where status is one of
     VALID, CLAIMED, EXPIRED, VOID, FAKE."""
@@ -267,10 +224,9 @@ def check_token(code: str):
         return "FAKE", "Not a valid token format.", None
     if not signature_ok(code):
         return "FAKE", "Security signature does not match - this token was not issued by us.", None
-    row = db().execute("SELECT * FROM tokens WHERE code = ?", (code,)).fetchone()
-    if row is None:
+    t = store().get_token(code)
+    if t is None:
         return "FAKE", "Token not found in the system.", None
-    t = token_dict(row)
     if t["status"] == "claimed":
         return "CLAIMED", f"Already claimed on {t['claimed_at']} at {t['claimed_outlet']}.", t
     if t["status"] == "void":
@@ -281,11 +237,7 @@ def check_token(code: str):
 
 
 def log_scan(code, result, outlet):
-    db().execute(
-        "INSERT INTO scan_log (code, result, outlet, scanned_at) VALUES (?,?,?,?)",
-        (code[:64], result, outlet, now()),
-    )
-    db().commit()
+    store().log_scan(code, result, outlet, now())
 
 
 # ------------------------------------------------------------------ auth
@@ -337,17 +289,9 @@ def verify_page():
 def tokens_page():
     q = request.args.get("q", "").strip()
     status = request.args.get("status", "")
-    sql, args = "SELECT * FROM tokens WHERE 1=1", []
-    if q:
-        sql += " AND (code LIKE ? OR customer LIKE ? OR phone LIKE ? OR reward_item LIKE ?)"
-        args += [f"%{q}%"] * 4
-    if status:
-        sql += " AND status = ?"
-        args.append(status)
-    rows = db().execute(sql + " ORDER BY issued_at DESC LIMIT 500", args).fetchall()
-    stats = {r["status"]: r["n"] for r in db().execute(
-        "SELECT status, COUNT(*) n FROM tokens GROUP BY status")}
-    fakes = db().execute("SELECT COUNT(*) AS n FROM scan_log WHERE result='FAKE'").fetchone()["n"]
+    rows = store().list_tokens(q=q, status=status)
+    stats = store().stats()
+    fakes = store().fake_count()
     return render_template("tokens.html", page="tokens", rows=rows, q=q,
                            status=status, stats=stats, fakes=fakes, now=now())
 
@@ -355,10 +299,10 @@ def tokens_page():
 @app.route("/token/<code>")
 @login_required
 def ticket_page(code):
-    row = db().execute("SELECT * FROM tokens WHERE code = ?", (code.upper(),)).fetchone()
-    if not row:
+    t = store().get_token(code.upper())
+    if not t:
         abort(404)
-    return render_template("ticket.html", t=token_dict(row))
+    return render_template("ticket.html", t=t)
 
 
 # ------------------------------------------------------------------- API
@@ -381,19 +325,15 @@ def api_issue():
     for _ in range(qty):
         while True:
             code = new_code()
-            try:
-                db().execute(
-                    "INSERT INTO tokens (code, reward_type, reward_item, customer, phone,"
-                    " issued_at, issued_by, expires_at) VALUES (?,?,?,?,?,?,?,?)",
-                    (code, reward_type, item, (d.get("customer") or "").strip()[:80],
-                     (d.get("phone") or "").strip()[:20], now(), session.get("outlet"), expires),
-                )
-                break
-            except INTEGRITY_ERRORS:
-                db().rollback()
-                continue  # astronomically unlikely collision; try again
+            ok = store().insert_token({
+                "code": code, "reward_type": reward_type, "reward_item": item,
+                "customer": (d.get("customer") or "").strip()[:80],
+                "phone": (d.get("phone") or "").strip()[:20],
+                "issued_at": now(), "issued_by": session.get("outlet"), "expires_at": expires,
+                "status": "active", "claimed_at": None, "claimed_outlet": None})
+            if ok:
+                break  # else: astronomically unlikely collision; try another code
         codes.append(code)
-    db().commit()
     return jsonify(codes=codes)
 
 
@@ -415,15 +355,11 @@ def api_claim():
         return jsonify(status=status, message=message, token=token, code=code), 409
     outlet = session.get("outlet")
     # Atomic: only succeeds if the token is still active.
-    cur = db().execute(
-        "UPDATE tokens SET status='claimed', claimed_at=?, claimed_outlet=?"
-        " WHERE code=? AND status='active'", (now(), outlet, code))
-    db().commit()
-    if cur.rowcount != 1:
+    if not store().claim(code, now(), outlet):
         status, message, token = check_token(code)
         return jsonify(status=status, message=message, token=token, code=code), 409
     log_scan(code, "CLAIMED_NOW", outlet)
-    token = token_dict(db().execute("SELECT * FROM tokens WHERE code=?", (code,)).fetchone())
+    token = store().get_token(code)
     return jsonify(status="CLAIMED_NOW", message=f"Successfully claimed at {outlet}. Hand over the reward.",
                    token=token, code=code)
 
@@ -432,8 +368,7 @@ def api_claim():
 @login_required
 def api_void():
     code = (request.get_json(force=True).get("code") or "").strip().upper()
-    db().execute("UPDATE tokens SET status='void' WHERE code=? AND status='active'", (code,))
-    db().commit()
+    store().void(code)
     return jsonify(ok=True)
 
 
