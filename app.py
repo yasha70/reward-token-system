@@ -28,32 +28,68 @@ from flask import (Flask, abort, g, jsonify, redirect, render_template,
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ON_VERCEL = bool(os.environ.get("VERCEL"))
-# Postgres (required on Vercel), e.g. Neon from the Vercel Marketplace.
-DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL")
 DB_PATH = os.environ.get("TOKEN_DB", os.path.join(BASE_DIR, "tokens.db"))  # local SQLite
 SECRET_FILE = os.path.join(BASE_DIR, ".secret_key")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
-APP_TIMEZONE = os.environ.get("APP_TIMEZONE")  # e.g. "Asia/Kolkata"; default = server time
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD") or ("" if ON_VERCEL else "admin123")
+APP_TIMEZONE = (os.environ.get("APP_TIMEZONE") or "").strip() or None  # e.g. "Asia/Kolkata"
 
 ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O/1/I to avoid misreads
 CODE_RE = re.compile(r"^RW-([A-Z0-9]{8})-([A-F0-9]{6})$")
 
+# Problems that stop the app from working. Shown on every page (and /health)
+# instead of crashing, so it is obvious what to fix in the Vercel settings.
+CONFIG_ERRORS = []
+
+
+def find_database_url():
+    """Postgres connection string. Vercel's Neon integration sets DATABASE_URL /
+    POSTGRES_URL, or <PREFIX>_DATABASE_URL when a custom prefix was chosen."""
+    for name in ("DATABASE_URL", "POSTGRES_URL"):
+        if os.environ.get(name):
+            return os.environ[name].strip()
+    for name, value in sorted(os.environ.items()):
+        if name.endswith(("_DATABASE_URL", "_POSTGRES_URL")) and value.startswith(("postgres://", "postgresql://")):
+            return value.strip()
+    return None
+
+
+DATABASE_URL = find_database_url()
+
+INTEGRITY_ERRORS = (sqlite3.IntegrityError,)
 if DATABASE_URL:
-    import psycopg
-    from psycopg.rows import dict_row
-    INTEGRITY_ERRORS = (psycopg.errors.UniqueViolation,)
+    try:
+        import psycopg
+        from psycopg.rows import dict_row
+        INTEGRITY_ERRORS = (psycopg.errors.UniqueViolation,)
+    except Exception as e:
+        CONFIG_ERRORS.append(f"Postgres driver failed to load: {type(e).__name__}: {e}")
 else:
-    if ON_VERCEL:
-        raise RuntimeError("DATABASE_URL (Postgres) must be set on Vercel - SQLite files do not persist there.")
     INTEGRITY_ERRORS = (sqlite3.IntegrityError,)
+    if ON_VERCEL:
+        CONFIG_ERRORS.append(
+            "No database connected. In Vercel open Storage -> Create Database -> Neon (Postgres), "
+            "connect it to this project, then Redeploy.")
+
+if ON_VERCEL and not ADMIN_PASSWORD:
+    CONFIG_ERRORS.append("ADMIN_PASSWORD is not set. Add it in Settings -> Environment Variables, then Redeploy.")
+
+if APP_TIMEZONE:
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(APP_TIMEZONE)
+    except Exception:
+        CONFIG_ERRORS.append(f"APP_TIMEZONE '{APP_TIMEZONE}' is not a valid time zone. "
+                             "Use a name like Asia/Kolkata, then Redeploy.")
 
 
 def load_secret() -> bytes:
-    env = os.environ.get("TOKEN_SECRET")
+    env = (os.environ.get("TOKEN_SECRET") or "").strip()
     if env:
         return env.encode()
     if ON_VERCEL:
-        raise RuntimeError("TOKEN_SECRET must be set on Vercel.")
+        CONFIG_ERRORS.append("TOKEN_SECRET is not set. Add a long random value in Settings -> "
+                             "Environment Variables, then Redeploy.")
+        return secrets.token_hex(32).encode()  # placeholder; requests are blocked anyway
     if not os.path.exists(SECRET_FILE):
         with open(SECRET_FILE, "w") as f:
             f.write(secrets.token_hex(32))
@@ -135,12 +171,62 @@ SCHEMA = [
 ]
 
 
+_db_ready = False
+_db_error = None
+
+
 def init_db():
-    d = Database()
-    for stmt in SCHEMA:
-        d.execute(stmt)
-    d.commit()
-    d.close()
+    """Create tables once per server instance. Returns an error string or None."""
+    global _db_ready, _db_error
+    if _db_ready:
+        return None
+    try:
+        d = Database()
+        for stmt in SCHEMA:
+            d.execute(stmt)
+        d.commit()
+        d.close()
+        _db_ready, _db_error = True, None
+    except Exception as e:  # report it on the page instead of a bare 500
+        msg = str(e).strip().splitlines()[0] if str(e).strip() else ""
+        if DATABASE_URL:
+            msg = msg.replace(DATABASE_URL, "<DATABASE_URL>")
+        _db_error = f"Cannot connect to the database ({type(e).__name__}: {msg[:200]})"
+    return _db_error
+
+
+SETUP_PAGE = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>Setup needed</title><body style="font-family:system-ui,sans-serif;max-width:640px;margin:40px auto;padding:0 16px;color:#1d2330">
+<h1 style="color:#dc2626">Setup needed</h1><p>The app is deployed but not configured yet:</p><ul>{items}</ul>
+<p style="color:#6b7280">After changing environment variables on Vercel, open <b>Deployments &rarr; &hellip; &rarr; Redeploy</b>.</p></body>"""
+
+
+def problems():
+    errs = list(CONFIG_ERRORS)
+    if not errs:
+        err = init_db()
+        if err:
+            errs.append(err)
+    return errs
+
+
+@app.before_request
+def require_setup():
+    if request.path == "/health" or request.path.startswith("/static/"):
+        return None
+    errs = problems()
+    if errs:
+        from markupsafe import escape
+        items = "".join(f"<li style='margin:8px 0'>{escape(e)}</li>" for e in errs)
+        return SETUP_PAGE.format(items=items), 503
+
+
+@app.route("/health")
+def health():
+    errs = problems()
+    return jsonify(ok=not errs, problems=errs, on_vercel=ON_VERCEL,
+                   database="postgres" if DATABASE_URL else "sqlite",
+                   timezone=APP_TIMEZONE or "server default"), (200 if not errs else 503)
 
 
 # ------------------------------------------------------------ token codes
@@ -350,8 +436,6 @@ def api_void():
     db().commit()
     return jsonify(ok=True)
 
-
-init_db()
 
 if __name__ == "__main__":
     if ADMIN_PASSWORD == "admin123":
