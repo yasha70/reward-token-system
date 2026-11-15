@@ -25,7 +25,7 @@ Open http://localhost:5000 and log in with the outlet name and the admin passwor
 
 1. **Generate Token**: pick *Free Food* or *Gift*, enter the item, and optionally the customer
    name and phone, the validity in days and how many tokens to make. You get a
-   ticket with a barcode. Print it, or let the customer take a photo of it.
+   ticket with a barcode, a QR code, or both (switch any time on the ticket). Print it, or let the customer take a photo of it.
 2. **Admin: Scan & Verify**: at the outlet, scan the customer's barcode in one of three ways:
    - **Camera** (phone, tablet or laptop webcam): press *Start camera*
    - **USB/Bluetooth barcode scanner**: click the input box and scan (it types the code and presses Enter)

@@ -20,7 +20,7 @@
 <h1>Admin: scan &amp; verify token</h1>
 <div class="grid">
   <div class="card">
-    <h2>1. Scan barcode</h2>
+    <h2>1. Scan barcode or QR code</h2>
     <div id="reader" hidden></div>
     <div style="margin-top:10px; display:flex; gap:8px">
       <button id="camBtn" type="button">Start camera</button>
@@ -109,7 +109,7 @@ $('#camBtn').onclick = async () => {
   scanner = new Html5Qrcode('reader', {formatsToSupport:[Html5QrcodeSupportedFormats.CODE_128, Html5QrcodeSupportedFormats.QR_CODE]});
   try {
     $("#reader").hidden = false;
-    await scanner.start({facingMode:'environment'}, {fps:10, qrbox:{width:300, height:120}}, txt => check(txt));
+    await scanner.start({facingMode:'environment'}, {fps:10, qrbox:(w, h) => ({width: Math.floor(w * 0.85), height: Math.floor(h * 0.7)})}, txt => check(txt));
     $('#camBtn').hidden = true; $('#stopBtn').hidden = false;
   } catch (err) {
     $('#reader').hidden = true; alert('Could not start camera: ' + err + '\nCamera needs HTTPS (or localhost) and permission.');
